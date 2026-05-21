@@ -47,4 +47,3 @@ hf_*.txt
 # Markdown files (except README.md)
 *.md
 !README.md
-

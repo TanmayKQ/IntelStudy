@@ -52,6 +52,14 @@ const studySessionSchema = new mongoose.Schema({
       message: 'Maximum 10 MCQs allowed per session'
     }
   },
+  scores: {
+    type: [{
+      correct: { type: Number, required: true, min: 0 },
+      total: { type: Number, required: true, min: 1 },
+      takenAt: { type: Date, default: Date.now }
+    }],
+    default: []
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -68,6 +76,9 @@ studySessionSchema.index({ userId: 1, createdAt: -1 }, { background: true })
 
 // Index on userId alone for faster lookups
 studySessionSchema.index({ userId: 1 }, { background: true })
+
+// TTL index — MongoDB auto-deletes sessions 90 days after creation
+studySessionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7776000, background: true })
 
 // Text index for search (if needed in future) - disabled to improve performance
 // studySessionSchema.index({ filename: 'text', summary: 'text' })

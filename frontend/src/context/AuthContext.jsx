@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect, useState } from 'react'
-import { 
-  signInWithEmailAndPassword, 
+import {
+  signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
-  onAuthStateChanged
+  onAuthStateChanged,
+  sendEmailVerification
 } from 'firebase/auth'
 import { auth } from '../services/firebase'
 
@@ -28,14 +29,11 @@ export const AuthProvider = ({ children }) => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       try {
         if (user) {
-          const token = await user.getIdToken()
           if (isMounted) {
-            localStorage.setItem('firebaseToken', token)
             setCurrentUser(user)
           }
         } else {
           if (isMounted) {
-            localStorage.removeItem('firebaseToken')
             setCurrentUser(null)
           }
         }
@@ -68,22 +66,17 @@ export const AuthProvider = ({ children }) => {
   }, [])
 
   const login = async (email, password) => {
-    const userCredential = await signInWithEmailAndPassword(auth, email, password)
-    const token = await userCredential.user.getIdToken()
-    localStorage.setItem('firebaseToken', token)
-    return userCredential
+    return signInWithEmailAndPassword(auth, email, password)
   }
 
   const signup = async (email, password) => {
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password)
-    const token = await userCredential.user.getIdToken()
-    localStorage.setItem('firebaseToken', token)
-    return userCredential
+    const credential = await createUserWithEmailAndPassword(auth, email, password)
+    await sendEmailVerification(credential.user).catch(() => {})
+    return credential
   }
 
   const logout = async () => {
     await signOut(auth)
-    localStorage.removeItem('firebaseToken')
   }
 
   const value = {

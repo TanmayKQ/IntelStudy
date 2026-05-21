@@ -1,4 +1,5 @@
 import axios from 'axios'
+import Groq from 'groq-sdk'
 import dotenv from 'dotenv'
 import logger from '../utils/logger.js'
 import { retryWithBackoff, retryOnCondition } from '../utils/retry.js'
@@ -30,6 +31,15 @@ const hfAxios = axios.create({
   headers: hfHeaders,
   validateStatus: (status) => status < 500
 })
+
+// Groq client — used as primary AI provider when GROQ_API_KEY is set
+const groqClient = process.env.GROQ_API_KEY
+  ? new Groq({ apiKey: process.env.GROQ_API_KEY, timeout: 30000 })
+  : null
+
+if (!groqClient) {
+  logger.warn('GROQ_API_KEY is not set. Falling back to HuggingFace (slower, lower quality).')
+}
 
 const callHuggingFace = async (model, inputs, options = {}) => {
   const shouldRetry = (error) => {
@@ -220,6 +230,85 @@ const createStructuredSummary = (extracted) => {
   return finalSummary
 }
 
+// ─── Groq helpers ────────────────────────────────────────────────────────────
+
+const summarizeWithGroq = async (text) => {
+  const completion = await groqClient.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [
+      {
+        role: 'system',
+        content: 'You are an expert academic summarizer. Create clear, informative summaries of documents.'
+      },
+      {
+        role: 'user',
+        content: `Summarize the following document using this structure:
+
+**Main Topic:** (1-2 sentences on the core subject)
+**Key Points:**
+- (3-5 bullet points covering the most important information)
+**Conclusions:** (1-2 sentences on the main takeaways)
+
+Document:
+${text.substring(0, 12000)}`
+      }
+    ],
+    temperature: 0.3,
+    max_tokens: 800
+  })
+
+  const summary = completion.choices[0]?.message?.content?.trim()
+  if (!summary || summary.length < 50) throw new Error('Empty response from Groq')
+  return summary
+}
+
+const generateMCQsWithGroq = async (text) => {
+  const completion = await groqClient.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: 'You are an expert educator who creates high-quality multiple-choice questions. Always respond with valid JSON only.'
+      },
+      {
+        role: 'user',
+        content: `Generate exactly 5 multiple-choice questions based on the document below.
+
+Requirements:
+- Test understanding and critical thinking, not just memorisation
+- Mix question types (conceptual, analytical, application-based)
+- Make all 4 options plausible — avoid obviously wrong distractors
+- The "answer" field must be the exact text of the correct option
+
+Respond with this exact JSON structure:
+{"questions": [{"question": "...", "options": ["option1", "option2", "option3", "option4"], "answer": "exact correct option text"}]}
+
+Document:
+${text.substring(0, 10000)}`
+      }
+    ],
+    temperature: 0.7,
+    max_tokens: 2000
+  })
+
+  const parsed = JSON.parse(completion.choices[0].message.content)
+  const questions = parsed.questions || parsed.mcqs || []
+  if (!Array.isArray(questions) || questions.length === 0) {
+    throw new Error('No questions in Groq response')
+  }
+
+  return questions.slice(0, 5).map(q => ({
+    question: q.question || 'Question not generated',
+    options: Array.isArray(q.options) && q.options.length === 4
+      ? q.options
+      : ['Option A', 'Option B', 'Option C', 'Option D'],
+    answer: q.answer || q.options?.[0] || 'Option A'
+  }))
+}
+
+// ─── HuggingFace summarization ────────────────────────────────────────────────
+
 export const summarizeText = async (text) => {
   if (!text || text.trim().length === 0) {
     throw new Error('Text is empty or invalid')
@@ -234,14 +323,23 @@ export const summarizeText = async (text) => {
     return createStructuredSummary(extracted)
   }
 
-  // For longer texts, use best free models with structured prompts
-  // Using instruction-tuned models for better quality
+  // Try Groq first — faster and much higher quality
+  if (groqClient) {
+    try {
+      logger.info('Attempting summarization with Groq (llama-3.3-70b-versatile)')
+      const summary = await summarizeWithGroq(text)
+      logger.info('Successfully summarized with Groq')
+      return summary
+    } catch (error) {
+      logger.warn('Groq summarization failed, falling back to HuggingFace:', error.message)
+    }
+  }
+
+  // HuggingFace fallback — ordered by summarization quality
   const models = [
-    'google/flan-t5-large',           // Best: Instruction-tuned, excellent structured output
-    'google/flan-t5-base',            // Fast alternative with good quality
-    'Falconsai/text_summarization',   // Specialized for summarization
-    'facebook/bart-large-cnn',        // Reliable fallback
-    'google/pegasus-xsum',            // Good abstractive summarization
+    'facebook/bart-large-cnn',        // Gold standard free summarization model
+    'google/pegasus-xsum',            // Strong abstractive summarization
+    'Falconsai/text_summarization',   // Fine-tuned summarization model
     'sshleifer/distilbart-cnn-12-6'   // Fast fallback
   ]
 
@@ -338,13 +436,22 @@ export const generateMCQs = async (text) => {
     throw new Error('Text is empty or invalid')
   }
 
-  // Use best free models for MCQ generation - instruction-tuned models work much better
+  // Try Groq first — reliable structured JSON output
+  if (groqClient) {
+    try {
+      logger.info('Attempting MCQ generation with Groq (llama-3.3-70b-versatile)')
+      const mcqs = await generateMCQsWithGroq(text)
+      logger.info(`Successfully generated ${mcqs.length} MCQs with Groq`)
+      return mcqs
+    } catch (error) {
+      logger.warn('Groq MCQ generation failed, falling back to HuggingFace:', error.message)
+    }
+  }
+
+  // HuggingFace fallback — instruction-tuned models only (GPT-2 / DialoGPT removed)
   const models = [
-    'google/flan-t5-large',        // Best: Excellent at following instructions and structured output
-    'google/flan-t5-base',         // Fast alternative with good quality
-    'microsoft/DialoGPT-large',    // Good for question generation
-    'gpt2',                        // Fallback
-    'distilgpt2'                   // Fast fallback
+    'google/flan-t5-xl',    // 3B params — most reliable free instruction-following model
+    'google/flan-t5-large', // 780M params — smaller fallback
   ]
 
   const prompt = `You are an expert educator. Create exactly 5 diverse multiple-choice questions (mix what/why/how/which/identify) based on the text below. Each question must be clear and concise. Vary structure and avoid revealing answers in the question. Return ONLY valid JSON array with objects: {"question": "...", "options": ["A","B","C","D"], "answer": "one of the options"}.
@@ -500,13 +607,15 @@ const generateIntelligentMCQs = (text) => {
   return mcqs.slice(0, 5)
 }
 
-export const processDocument = async (text) => {
+export const processDocument = async (text, onProgress) => {
   if (!text || text.trim().length === 0) {
     throw new Error('Document text is empty or invalid')
   }
 
   const wordCount = text.split(/\s+/).length
   logger.info(`Processing document: ${wordCount} words`)
+
+  onProgress?.({ stage: 'summarizing', message: 'Generating AI summary...' })
 
   let finalSummary = ''
 
@@ -568,7 +677,7 @@ export const processDocument = async (text) => {
   }
 
   logger.info(`Summary generated: ${finalSummary.length} characters`)
-  logger.info('Generating MCQs')
+  onProgress?.({ stage: 'mcqs', message: 'Creating quiz questions...' })
   const mcqs = await generateMCQs(text)
 
   return {

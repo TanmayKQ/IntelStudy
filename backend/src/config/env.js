@@ -11,6 +11,7 @@ const requiredEnvVars = [
 ]
 
 const optionalEnvVars = [
+  'GROQ_API_KEY',
   'HF_API_KEY',
   'PORT',
   'NODE_ENV',
