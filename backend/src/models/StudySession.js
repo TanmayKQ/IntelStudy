@@ -27,8 +27,7 @@ const mcqSchema = new mongoose.Schema({
 const studySessionSchema = new mongoose.Schema({
   userId: {
     type: String,
-    required: true,
-    index: true
+    required: true
   },
   filename: {
     type: String,
@@ -62,8 +61,7 @@ const studySessionSchema = new mongoose.Schema({
   },
   createdAt: {
     type: Date,
-    default: Date.now,
-    index: true
+    default: Date.now
   }
 }, {
   timestamps: false,
